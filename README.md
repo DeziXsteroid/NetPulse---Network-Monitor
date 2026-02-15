@@ -13,8 +13,8 @@ NetPulse - ключ к лучшему мониторингу!
 # Изображения
 Простой режим:
 
-![Uploading Снимок экрана (54).png…]()
+<img width="1641" height="1036" alt="Снимок экрана (54)" src="https://github.com/user-attachments/assets/3e9614df-a47e-497e-a87f-90ddebe55f92" />
 
 Расширенный режим: 
 
-![Uploading Снимок экрана (55).png…]()
+<img width="2292" height="1354" alt="Снимок экрана (55)" src="https://github.com/user-attachments/assets/014bc5f0-cdf2-4c2f-a83f-80cf401c5511" />
