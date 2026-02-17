@@ -4,6 +4,7 @@ import sys
 import time
 import math
 import subprocess
+import socket
 import shutil
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -15,18 +16,19 @@ import pyqtgraph as pg
 from PySide6.QtCore import (
     Qt, QTimer, QSize, QRunnable, QThreadPool, Signal, QObject, QPoint
 )
-from PySide6.QtGui import QAction, QPixmap, QImageReader, QColor
+from PySide6.QtGui import QAction, QPixmap, QImageReader, QColor, QCursor
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QToolButton,
     QDialog, QTabWidget, QFormLayout, QSpinBox, QDoubleSpinBox, QLineEdit,
     QPushButton, QFileDialog, QListWidget, QListWidgetItem, QCheckBox,
     QSystemTrayIcon, QMenu, QStyle, QTableWidget, QTableWidgetItem, QHeaderView,
     QGraphicsBlurEffect, QComboBox, QStackedWidget, QSizePolicy,
-    QGroupBox, QColorDialog, QSlider, QTextEdit
+    QGroupBox, QColorDialog, QSlider, QTextEdit, QAbstractItemView
 )
 
 APP_NAME = "NetPulse"
 APP_VERSION = "0.1"
+
 
 
 
@@ -44,23 +46,17 @@ def app_config_dir() -> Path:
 
 
 def app_assets_dir() -> Path:
-    return Path(__file__).resolve().parent / "assets"
-
-
-def project_backgrounds_dir() -> Path:
-    d = app_assets_dir() / "backgrounds"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def appdata_assets_dir() -> Path:
     d = app_config_dir() / "assets"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
+def packaged_assets_dir() -> Path:
+    return Path(__file__).resolve().parent / "assets"
+
+
 def backgrounds_dir() -> Path:
-    d = appdata_assets_dir() / "backgrounds"
+    d = app_assets_dir() / "backgrounds"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -68,52 +64,18 @@ def backgrounds_dir() -> Path:
 SETTINGS_PATH = app_config_dir() / "settings.json"
 
 
-
-def is_image_readable(path: Path) -> bool:
+def ensure_seed_backgrounds():
+    src = packaged_assets_dir() / "backgrounds"
+    dst = backgrounds_dir()
     try:
-        r = QImageReader(str(path))
-        return r.canRead()
+        if src.exists() and src.is_dir():
+            for p in src.iterdir():
+                if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                    out = dst / p.name
+                    if not out.exists():
+                        shutil.copy2(p, out)
     except Exception:
-        return False
-
-
-def safe_pixmap(path: Path):
-    if not is_image_readable(path):
-        return None
-    pm = QPixmap(str(path))
-    if pm.isNull():
-        return None
-    return pm
-
-
-
-
-def _copy_file_safe(src: Path, dst: Path) -> bool:
-    try:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(src), str(dst))
-        return True
-    except Exception:
-        return False
-
-
-def ensure_builtin_backgrounds_in_appdata(default_name: str = "BaseImage1.png") -> None:
-    src_dir = project_backgrounds_dir()
-    dst_dir = backgrounds_dir()
-
-    src_default = src_dir / default_name
-    dst_default = dst_dir / default_name
-
-    if src_default.exists():
-        if (not dst_default.exists()) or (not is_image_readable(dst_default)):
-            _copy_file_safe(src_default, dst_default)
-
-    if not any(dst_dir.iterdir()):
-        for p in src_dir.iterdir():
-            if p.is_file() and p.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp"] and is_image_readable(p):
-                _copy_file_safe(p, dst_dir / p.name)
-
-
+        pass
 
 
 @dataclass
@@ -134,22 +96,23 @@ class Settings:
 
     # Мониторинг
     ping_host: str = "1.1.1.1"
+    ping_port: int = 0
     stats_refresh_ms: int = 1000
     ping_refresh_ms: int = 1500
 
     follow_graph: bool = True
 
     # выбор адаптеров
-    simple_adapter: str = "active"
     graph_adapter: str = "active"
+    simple_adapter: str = "active"
     monitored_adapters: list = field(default_factory=list)
 
-
-    graph_color_mode: str = "auto"
+    # Цвета графика
+    graph_color_mode: str = "auto"   # auto|custom
     graph_custom_color: str = "#4db7ff"
     line_width: int = 1
 
-
+    # Пороги качества
     good_ping_ms: int = 60
     ok_ping_ms: int = 150
     good_mbps: float = 5.0
@@ -157,7 +120,7 @@ class Settings:
 
     # Кастомизация
     use_builtin_background: bool = True
-    builtin_background_name: str = "BaseImage1.png"  # дефолт
+    builtin_background_name: str = "BaseImage1.png"
     background_path: str = ""
 
     window_opacity: int = 30
@@ -172,7 +135,7 @@ def save_settings(s: Settings) -> None:
 
 
 def load_settings() -> Settings:
-    ensure_builtin_backgrounds_in_appdata(default_name="BaseImage1.png")
+    ensure_seed_backgrounds()
 
     if SETTINGS_PATH.exists():
         try:
@@ -185,6 +148,10 @@ def load_settings() -> Settings:
                 s.mode = "simple"
             if not s.ping_host:
                 s.ping_host = "1.1.1.1"
+            if not isinstance(s.ping_port, int):
+                s.ping_port = 0
+            s.ping_port = int(max(0, min(65535, s.ping_port)))
+
             if s.graph_color_mode not in ("auto", "custom"):
                 s.graph_color_mode = "auto"
             if not s.graph_custom_color:
@@ -192,50 +159,88 @@ def load_settings() -> Settings:
             if not isinstance(s.monitored_adapters, list):
                 s.monitored_adapters = []
 
-            s.stats_refresh_ms = int(max(250, min(10000, s.stats_refresh_ms)))
-            s.ping_refresh_ms = int(max(500, min(20000, s.ping_refresh_ms)))
+
+            s.stats_refresh_ms = int(max(500, min(10000, s.stats_refresh_ms)))
+            s.ping_refresh_ms = int(max(700, min(20000, s.ping_refresh_ms)))
+
             s.blur_radius = int(max(0, min(60, s.blur_radius)))
             s.window_opacity = int(max(0, min(60, s.window_opacity)))
             s.line_width = int(max(1, min(6, s.line_width)))
 
 
-            if s.use_builtin_background and s.builtin_background_name:
-                ensure_builtin_backgrounds_in_appdata(default_name=s.builtin_background_name)
+            if s.good_mbps < s.ok_mbps:
+                s.good_mbps, s.ok_mbps = s.ok_mbps, s.good_mbps
 
 
-            if not getattr(s, "simple_adapter", None):
-                s.simple_adapter = "active"
+            if s.good_ping_ms > s.ok_ping_ms:
+                s.good_ping_ms, s.ok_ping_ms = s.ok_ping_ms, s.good_ping_ms
+
+
+            if s.use_builtin_background:
+                bg = backgrounds_dir() / (s.builtin_background_name or "")
+                if not bg.exists():
+                    files = sorted([p for p in backgrounds_dir().iterdir()
+                                    if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")])
+                    if files:
+                        s.builtin_background_name = files[0].name
 
             return s
         except Exception:
             pass
 
-
     s = Settings()
-    ensure_builtin_backgrounds_in_appdata(default_name=s.builtin_background_name)
+
+    files = sorted([p for p in backgrounds_dir().iterdir()
+                    if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")])
+    if files and not (backgrounds_dir() / s.builtin_background_name).exists():
+        s.builtin_background_name = files[0].name
+
     save_settings(s)
     return s
 
 
 
+def _startup_folder_win() -> Path:
+    return Path(os.environ.get("APPDATA", str(Path.home()))) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+
+
 def set_windows_autostart(app_name: str, enable: bool) -> None:
     if not sys.platform.startswith("win"):
         return
+
     try:
-        import winreg
-        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
-            if enable:
-                cmd = f'"{sys.executable}" "{Path(__file__).resolve()}"'
-                winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, cmd)
+        startup = _startup_folder_win()
+        startup.mkdir(parents=True, exist_ok=True)
+
+        vbs_path = startup / f"{app_name}_start.vbs"
+        bat_path = startup / f"{app_name}_start.bat"
+
+        if enable:
+            if getattr(sys, "frozen", False):
+                target_cmd = f'"{sys.executable}"'
             else:
-                try:
-                    winreg.DeleteValue(key, app_name)
-                except FileNotFoundError:
-                    pass
+                py = Path(sys.executable)
+                pyw = py.with_name("pythonw.exe")
+                runner = pyw if pyw.exists() else py
+                target_cmd = f'"{runner}" "{Path(__file__).resolve()}"'
+
+            vbs = (
+                'Set WshShell = CreateObject("WScript.Shell")\n'
+                f'WshShell.Run {json.dumps(target_cmd)}, 0, False\n'
+            )
+            vbs_path.write_text(vbs, encoding="utf-8")
+
+            if bat_path.exists():
+                bat_path.unlink(missing_ok=True)
+
+        else:
+            if vbs_path.exists():
+                vbs_path.unlink(missing_ok=True)
+            if bat_path.exists():
+                bat_path.unlink(missing_ok=True)
+
     except Exception:
         pass
-
 
 
 
@@ -254,9 +259,7 @@ def pick_active_adapter_name() -> str:
         if name.lower().startswith(("lo", "loopback")):
             continue
         low = name.lower()
-        if any(x in low for x in
-               ["virtual", "vmware", "hyper-v", "vbox", "loopback", "tunnel", "tap", "tun", "vpn", "wintun",
-                "wireguard"]):
+        if any(x in low for x in ["virtual", "vmware", "hyper-v", "vbox", "loopback", "tunnel", "tap", "tun", "vpn", "wintun", "wireguard"]):
             continue
 
         ip_score = 0
@@ -279,27 +282,14 @@ def pick_active_adapter_name() -> str:
 
 
 def ping_once(host: str = "1.1.1.1", timeout_ms: int = 800):
-
     try:
         if sys.platform.startswith("win"):
             cmd = ["ping", "-n", "1", "-w", str(timeout_ms), host]
         else:
             cmd = ["ping", "-c", "1", host]
 
-
-        creationflags = 0
-        startupinfo = None
-        if sys.platform.startswith("win"):
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-        p = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            creationflags=creationflags,
-            startupinfo=startupinfo
-        )
-
+        creation = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
+        p = subprocess.run(cmd, capture_output=True, text=True, creationflags=creation)
         out = (p.stdout or "") + (p.stderr or "")
         if p.returncode != 0:
             return None
@@ -332,6 +322,25 @@ def ping_once(host: str = "1.1.1.1", timeout_ms: int = 800):
         return None
 
 
+def tcp_ping(host: str, port: int = 443, timeout: float = 1.2):
+    try:
+        start = time.perf_counter()
+        with socket.create_connection((host, port), timeout=timeout):
+            pass
+        end = time.perf_counter()
+        return int(round((end - start) * 1000))
+    except Exception:
+        return None
+
+
+def ping_smart(host: str, port: int = 0):
+    if port and port > 0:
+        return tcp_ping(host, int(port))
+    ms = ping_once(host)
+    if ms is not None:
+        return ms
+    return tcp_ping(host, 443)
+
 
 
 class PingSignals(QObject):
@@ -339,14 +348,33 @@ class PingSignals(QObject):
 
 
 class PingTask(QRunnable):
-    def __init__(self, host: str):
+    def __init__(self, host: str, port: int):
         super().__init__()
         self.host = host
+        self.port = int(port or 0)
         self.signals = PingSignals()
 
     def run(self):
-        ms = ping_once(self.host)
+        ms = ping_smart(self.host, self.port)
         self.signals.done.emit(ms)
+
+
+
+def is_image_readable(path: Path) -> bool:
+    try:
+        r = QImageReader(str(path))
+        return r.canRead()
+    except Exception:
+        return False
+
+
+def safe_pixmap(path: Path):
+    if not is_image_readable(path):
+        return None
+    pm = QPixmap(str(path))
+    if pm.isNull():
+        return None
+    return pm
 
 
 
@@ -366,13 +394,13 @@ def quality_color(value, good: float, ok: float, invert: bool = False) -> str:
     if math.isnan(v) or math.isinf(v):
         return RED
 
-    if invert:  # ping: меньше лучше
+    if invert:
         if v <= good:
             return GREEN
         if v <= ok:
             return YELLOW
         return RED
-    else:  # mbps: больше лучше
+    else:
         if v >= good:
             return GREEN
         if v >= ok:
@@ -388,27 +416,23 @@ def split_series_by_quality(xs, ys, good, ok, invert=False):
 
     for x, y in zip(xs, ys):
         col = quality_color(y, good, ok, invert=invert)
+        try:
+            yf = float(y)
+        except Exception:
+            yf = nan
+
         if col == GREEN:
-            x_g.append(x);
-            y_g.append(float(y))
-            x_y.append(x);
-            y_y.append(nan)
-            x_r.append(x);
-            y_r.append(nan)
+            x_g.append(x); y_g.append(yf)
+            x_y.append(x); y_y.append(nan)
+            x_r.append(x); y_r.append(nan)
         elif col == YELLOW:
-            x_g.append(x);
-            y_g.append(nan)
-            x_y.append(x);
-            y_y.append(float(y))
-            x_r.append(x);
-            y_r.append(nan)
+            x_g.append(x); y_g.append(nan)
+            x_y.append(x); y_y.append(yf)
+            x_r.append(x); y_r.append(nan)
         else:
-            x_g.append(x);
-            y_g.append(nan)
-            x_y.append(x);
-            y_y.append(nan)
-            x_r.append(x);
-            y_r.append(float(y))
+            x_g.append(x); y_g.append(nan)
+            x_y.append(x); y_y.append(nan)
+            x_r.append(x); y_r.append(yf)
     return (x_g, y_g), (x_y, y_y), (x_r, y_r)
 
 
@@ -504,49 +528,34 @@ class SettingsDialog(QDialog):
         self.cb_mode.addItems(["simple", "advanced"])
         self.cb_mode.setCurrentText(self.settings.mode)
 
-        self.chk_autostart = QCheckBox("Запускать при старте системы (Windows)")
+        self.chk_autostart = QCheckBox("Запускать при старте системы (Windows, через Startup .bat)")
         self.chk_autostart.setChecked(self.settings.autostart)
 
         self.chk_tray = QCheckBox("Показывать в трее")
         self.chk_tray.setChecked(self.settings.tray_enabled)
 
-        self.chk_tray_popup = QCheckBox("Popup при клике по трею")
+        self.chk_tray_popup = QCheckBox("Popup при клике по трею (уведомление/меню)")
         self.chk_tray_popup.setChecked(self.settings.tray_click_popup)
 
         self.chk_remember_geom = QCheckBox("Сохранять позицию окна (координаты) и применять при запуске")
         self.chk_remember_geom.setChecked(self.settings.remember_geometry)
 
-        self.sp_simple_w = QSpinBox();
-        self.sp_simple_w.setRange(280, 1600);
-        self.sp_simple_w.setValue(self.settings.simple_w)
-        self.sp_simple_h = QSpinBox();
-        self.sp_simple_h.setRange(140, 1200);
-        self.sp_simple_h.setValue(self.settings.simple_h)
-        self.sp_adv_w = QSpinBox();
-        self.sp_adv_w.setRange(600, 2400);
-        self.sp_adv_w.setValue(self.settings.adv_w)
-        self.sp_adv_h = QSpinBox();
-        self.sp_adv_h.setRange(500, 1800);
-        self.sp_adv_h.setValue(self.settings.adv_h)
+
+        self.sp_simple_w = QSpinBox(); self.sp_simple_w.setRange(280, 1600); self.sp_simple_w.setValue(self.settings.simple_w)
+        self.sp_simple_h = QSpinBox(); self.sp_simple_h.setRange(140, 1200); self.sp_simple_h.setValue(self.settings.simple_h)
+        self.sp_adv_w = QSpinBox(); self.sp_adv_w.setRange(600, 2400); self.sp_adv_w.setValue(self.settings.adv_w)
+        self.sp_adv_h = QSpinBox(); self.sp_adv_h.setRange(500, 1800); self.sp_adv_h.setValue(self.settings.adv_h)
 
         row_simple = QWidget()
-        rsl = QHBoxLayout(row_simple);
-        rsl.setContentsMargins(0, 0, 0, 0);
-        rsl.setSpacing(8)
-        rsl.addWidget(QLabel("W"));
-        rsl.addWidget(self.sp_simple_w)
-        rsl.addWidget(QLabel("H"));
-        rsl.addWidget(self.sp_simple_h)
+        rsl = QHBoxLayout(row_simple); rsl.setContentsMargins(0,0,0,0); rsl.setSpacing(8)
+        rsl.addWidget(QLabel("W")); rsl.addWidget(self.sp_simple_w)
+        rsl.addWidget(QLabel("H")); rsl.addWidget(self.sp_simple_h)
         rsl.addStretch(1)
 
         row_adv = QWidget()
-        ral = QHBoxLayout(row_adv);
-        ral.setContentsMargins(0, 0, 0, 0);
-        ral.setSpacing(8)
-        ral.addWidget(QLabel("W"));
-        ral.addWidget(self.sp_adv_w)
-        ral.addWidget(QLabel("H"));
-        ral.addWidget(self.sp_adv_h)
+        ral = QHBoxLayout(row_adv); ral.setContentsMargins(0,0,0,0); ral.setSpacing(8)
+        ral.addWidget(QLabel("W")); ral.addWidget(self.sp_adv_w)
+        ral.addWidget(QLabel("H")); ral.addWidget(self.sp_adv_h)
         ral.addStretch(1)
 
         form.addRow("Режим:", self.cb_mode)
@@ -570,28 +579,23 @@ class SettingsDialog(QDialog):
 
         self.ed_ping_host = QLineEdit(self.settings.ping_host)
 
+        self.sp_ping_port = QSpinBox()
+        self.sp_ping_port.setRange(0, 65535)
+        self.sp_ping_port.setValue(int(self.settings.ping_port or 0))
+        self.sp_ping_port.setToolTip("0 = авто (ICMP -> TCP443). Иначе TCP ping на host:port")
+
         self.sp_stats = QSpinBox()
-        self.sp_stats.setRange(250, 10000)
+        self.sp_stats.setRange(500, 10000)
         self.sp_stats.setSingleStep(250)
         self.sp_stats.setValue(self.settings.stats_refresh_ms)
 
         self.sp_ping = QSpinBox()
-        self.sp_ping.setRange(500, 20000)
+        self.sp_ping.setRange(700, 20000)
         self.sp_ping.setSingleStep(250)
         self.sp_ping.setValue(self.settings.ping_refresh_ms)
 
         self.chk_follow = QCheckBox("Следовать за графиком (синхронизировать ось времени)")
         self.chk_follow.setChecked(self.settings.follow_graph)
-
-        self.cb_simple_adapter = QComboBox()
-        self.cb_simple_adapter.addItem("active")
-        for nic in list_adapters():
-            self.cb_simple_adapter.addItem(nic)
-        cur_simple = self.settings.simple_adapter if self.settings.simple_adapter else "active"
-        if self.cb_simple_adapter.findText(cur_simple) == -1:
-            cur_simple = "active"
-        self.cb_simple_adapter.setCurrentText(cur_simple)
-
 
         self.cb_color_mode = QComboBox()
         self.cb_color_mode.addItems(["auto", "custom"])
@@ -603,9 +607,7 @@ class SettingsDialog(QDialog):
         self.btn_pick_color.clicked.connect(self._pick_color)
 
         row_color = QWidget()
-        rcl = QHBoxLayout(row_color);
-        rcl.setContentsMargins(0, 0, 0, 0);
-        rcl.setSpacing(10)
+        rcl = QHBoxLayout(row_color); rcl.setContentsMargins(0,0,0,0); rcl.setSpacing(10)
         rcl.addWidget(self.cb_color_mode)
         rcl.addWidget(self.btn_pick_color)
         rcl.addWidget(self.lbl_color)
@@ -615,48 +617,51 @@ class SettingsDialog(QDialog):
         self.sp_line_width.setRange(1, 6)
         self.sp_line_width.setValue(self.settings.line_width)
 
+        all_nics = list_adapters()
+
+        self.cb_simple_adapter = QComboBox()
+        self.cb_simple_adapter.addItem("active")
+        for nic in all_nics:
+            self.cb_simple_adapter.addItem(nic)
+        cur_s = self.settings.simple_adapter if self.settings.simple_adapter else "active"
+        if self.cb_simple_adapter.findText(cur_s) == -1:
+            cur_s = "active"
+        self.cb_simple_adapter.setCurrentText(cur_s)
 
         self.cb_graph_adapter = QComboBox()
         self.cb_graph_adapter.addItem("active")
-        for nic in list_adapters():
+        for nic in all_nics:
             self.cb_graph_adapter.addItem(nic)
-        cur = self.settings.graph_adapter if self.settings.graph_adapter else "active"
-        if self.cb_graph_adapter.findText(cur) == -1:
-            cur = "active"
-        self.cb_graph_adapter.setCurrentText(cur)
+        cur_g = self.settings.graph_adapter if self.settings.graph_adapter else "active"
+        if self.cb_graph_adapter.findText(cur_g) == -1:
+            cur_g = "active"
+        self.cb_graph_adapter.setCurrentText(cur_g)
+
 
         self.list_table_adapters = QListWidget()
         self.list_table_adapters.setSelectionMode(QListWidget.MultiSelection)
         selected = set(self.settings.monitored_adapters or [])
-        for nic in list_adapters():
+        for nic in all_nics:
             it = QListWidgetItem(nic)
             self.list_table_adapters.addItem(it)
             if nic in selected:
                 it.setSelected(True)
 
-        self.sp_good_ping = QSpinBox();
-        self.sp_good_ping.setRange(1, 2000);
-        self.sp_good_ping.setValue(self.settings.good_ping_ms)
-        self.sp_ok_ping = QSpinBox();
-        self.sp_ok_ping.setRange(1, 5000);
-        self.sp_ok_ping.setValue(self.settings.ok_ping_ms)
-        self.sp_good_mbps = QDoubleSpinBox();
-        self.sp_good_mbps.setRange(0.0, 100000.0);
-        self.sp_good_mbps.setDecimals(2);
-        self.sp_good_mbps.setValue(self.settings.good_mbps)
-        self.sp_ok_mbps = QDoubleSpinBox();
-        self.sp_ok_mbps.setRange(0.0, 100000.0);
-        self.sp_ok_mbps.setDecimals(2);
-        self.sp_ok_mbps.setValue(self.settings.ok_mbps)
 
-        form.addRow("Ping target:", self.ed_ping_host)
+        self.sp_good_ping = QSpinBox(); self.sp_good_ping.setRange(1, 2000); self.sp_good_ping.setValue(self.settings.good_ping_ms)
+        self.sp_ok_ping = QSpinBox(); self.sp_ok_ping.setRange(1, 5000); self.sp_ok_ping.setValue(self.settings.ok_ping_ms)
+        self.sp_good_mbps = QDoubleSpinBox(); self.sp_good_mbps.setRange(0.0, 100000.0); self.sp_good_mbps.setDecimals(2); self.sp_good_mbps.setValue(self.settings.good_mbps)
+        self.sp_ok_mbps = QDoubleSpinBox(); self.sp_ok_mbps.setRange(0.0, 100000.0); self.sp_ok_mbps.setDecimals(2); self.sp_ok_mbps.setValue(self.settings.ok_mbps)
+
+        form.addRow("Ping target (host):", self.ed_ping_host)
+        form.addRow("Ping port (0=auto):", self.sp_ping_port)
         form.addRow("Обновление скоростей/таблицы (мс):", self.sp_stats)
         form.addRow("Обновление Ping (мс):", self.sp_ping)
         form.addRow(self.chk_follow)
-        form.addRow("SIMPLE: адаптер:", self.cb_simple_adapter)
         form.addRow("Цвет графика:", row_color)
         form.addRow("Толщина линии:", self.sp_line_width)
-        form.addRow("ADV графики: адаптер", self.cb_graph_adapter)
+        form.addRow("Simple: адаптер", self.cb_simple_adapter)
+        form.addRow("Графики Mbps: адаптер", self.cb_graph_adapter)
         form.addRow("Таблица: адаптеры", self.list_table_adapters)
         form.addRow("Ping зелёный ≤ (мс):", self.sp_good_ping)
         form.addRow("Ping жёлтый ≤ (мс):", self.sp_ok_ping)
@@ -674,7 +679,7 @@ class SettingsDialog(QDialog):
         gb_bg = QGroupBox("Фон")
         form_bg = QFormLayout(gb_bg)
 
-        self.chk_builtin = QCheckBox("Использовать установленные фоны (AppData\\NetPulse\\assets\\backgrounds)")
+        self.chk_builtin = QCheckBox("Использовать установленные фоны (AppData/NetPulse/assets/backgrounds)")
         self.chk_builtin.setChecked(self.settings.use_builtin_background)
 
         self.list_bg = QListWidget()
@@ -718,9 +723,7 @@ class SettingsDialog(QDialog):
         self.sl_opacity.valueChanged.connect(lambda v: self.lbl_op.setText(str(v)))
 
         row_op = QWidget()
-        rol = QHBoxLayout(row_op);
-        rol.setContentsMargins(0, 0, 0, 0);
-        rol.setSpacing(10)
+        rol = QHBoxLayout(row_op); rol.setContentsMargins(0,0,0,0); rol.setSpacing(10)
         rol.addWidget(self.sl_opacity, 1)
         rol.addWidget(self.lbl_op)
 
@@ -754,13 +757,8 @@ class SettingsDialog(QDialog):
             }
         """)
         text.setText(
-            """
-            NetPulse - одна из самых простых и оптимизированных программ 
-            по мониторингу сети. Она позволяет отслеживать текущий трафик и пинг, а огромное
-            кол-во кастомизации позволит ее использовать любому пользователю!
-            
-            Version: 0.0.1 by DeziXsteroid
-            """
+            f""" NetPulse позволяет отслеживать состояние сети и мониторить
+статус текущего подключения. Version: 0.0.2, By DeziXsteroid""".strip()
         )
         v.addWidget(text)
         l.addWidget(gb)
@@ -768,8 +766,6 @@ class SettingsDialog(QDialog):
         return w
 
     def _load_builtin_backgrounds(self):
-        ensure_builtin_backgrounds_in_appdata(default_name=self.settings.builtin_background_name)
-
         self.list_bg.clear()
         files = sorted([p for p in backgrounds_dir().iterdir()
                         if p.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp"]])
@@ -794,7 +790,7 @@ class SettingsDialog(QDialog):
             self.lbl_color.setStyleSheet(f"color:{hexv}; font-weight:700;")
 
     def apply_to_settings(self):
-
+        # Basic
         self.settings.mode = self.cb_mode.currentText().strip()
         self.settings.autostart = self.chk_autostart.isChecked()
         self.settings.tray_enabled = self.chk_tray.isChecked()
@@ -806,18 +802,17 @@ class SettingsDialog(QDialog):
         self.settings.adv_w = int(self.sp_adv_w.value())
         self.settings.adv_h = int(self.sp_adv_h.value())
 
-
         self.settings.ping_host = self.ed_ping_host.text().strip() or "1.1.1.1"
+        self.settings.ping_port = int(self.sp_ping_port.value())
         self.settings.stats_refresh_ms = int(self.sp_stats.value())
         self.settings.ping_refresh_ms = int(self.sp_ping.value())
         self.settings.follow_graph = self.chk_follow.isChecked()
-
-        self.settings.simple_adapter = self.cb_simple_adapter.currentText().strip() or "active"
 
         self.settings.graph_color_mode = self.cb_color_mode.currentText().strip()
         self.settings.line_width = int(self.sp_line_width.value())
         self.settings.graph_custom_color = self.lbl_color.text().strip() or self.settings.graph_custom_color
 
+        self.settings.simple_adapter = self.cb_simple_adapter.currentText().strip() or "active"
         self.settings.graph_adapter = self.cb_graph_adapter.currentText().strip() or "active"
         self.settings.monitored_adapters = [it.text() for it in self.list_table_adapters.selectedItems()]
 
@@ -825,7 +820,6 @@ class SettingsDialog(QDialog):
         self.settings.ok_ping_ms = int(self.sp_ok_ping.value())
         self.settings.good_mbps = float(self.sp_good_mbps.value())
         self.settings.ok_mbps = float(self.sp_ok_mbps.value())
-
 
         self.settings.use_builtin_background = self.chk_builtin.isChecked()
         cur = self.list_bg.currentItem()
@@ -838,8 +832,14 @@ class SettingsDialog(QDialog):
         self.settings.blur_radius = int(self.sp_blur.value())
         self.settings.window_opacity = int(self.sl_opacity.value())
 
-        if self.settings.use_builtin_background and self.settings.builtin_background_name:
-            ensure_builtin_backgrounds_in_appdata(default_name=self.settings.builtin_background_name)
+        self.settings.stats_refresh_ms = int(max(500, min(10000, self.settings.stats_refresh_ms)))
+        self.settings.ping_refresh_ms = int(max(700, min(20000, self.settings.ping_refresh_ms)))
+        self.settings.ping_port = int(max(0, min(65535, self.settings.ping_port)))
+
+        if self.settings.good_mbps < self.settings.ok_mbps:
+            self.settings.good_mbps, self.settings.ok_mbps = self.settings.ok_mbps, self.settings.good_mbps
+        if self.settings.good_ping_ms > self.settings.ok_ping_ms:
+            self.settings.good_ping_ms, self.settings.ok_ping_ms = self.settings.ok_ping_ms, self.settings.good_ping_ms
 
 
 
@@ -852,6 +852,8 @@ class NetPulseWindow(QWidget):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
+        self.ping_running = False
+
         self._dragging = False
         self._drag_offset = QPoint(0, 0)
         self._save_geom_timer = QTimer(self)
@@ -859,7 +861,7 @@ class NetPulseWindow(QWidget):
         self._save_geom_timer.timeout.connect(self._persist_geometry)
 
         self.thread_pool = QThreadPool.globalInstance()
-
+        self.thread_pool.setMaxThreadCount(2)
 
         self.bg = QLabel(self)
         self.bg.setScaledContents(True)
@@ -870,7 +872,6 @@ class NetPulseWindow(QWidget):
         self.root = QWidget(self)
         self.root.setObjectName("root")
         self.root.setAttribute(Qt.WA_TranslucentBackground, True)
-
 
         self.btn_gear = QToolButton()
         self.btn_gear.setCursor(Qt.PointingHandCursor)
@@ -889,7 +890,6 @@ class NetPulseWindow(QWidget):
         header.addWidget(self.btn_gear, 0, Qt.AlignLeft | Qt.AlignTop)
         header.addWidget(self.lbl_connected, 1, Qt.AlignLeft | Qt.AlignVCenter)
 
-
         self.stack = QStackedWidget()
         self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -899,22 +899,20 @@ class NetPulseWindow(QWidget):
         self.stack.addWidget(self.page_simple)
         self.stack.addWidget(self.page_adv)
 
-
         root_l = QVBoxLayout(self.root)
         root_l.setContentsMargins(0, 0, 0, 0)
         root_l.setSpacing(0)
         root_l.addLayout(header)
         root_l.addWidget(self.stack, 1)
 
-
         self.active_adapter = pick_active_adapter_name()
         self.lbl_connected.setText(f"Подключено — {self.active_adapter}")
 
+        self._last_active_check = 0.0
+        self._active_check_interval = 3.0  # сек
 
         self.nic_last = {}
-        self.nic_speed_total_mbps = {}
-        self.nic_speed_down_mbps = {}
-        self.nic_speed_up_mbps = {}
+        self.nic_speed_mbps = {}
         self.nic_sent_mb = {}
         self.nic_recv_mb = {}
 
@@ -923,33 +921,18 @@ class NetPulseWindow(QWidget):
         self.total_recv_mb = io.bytes_recv / (1024 * 1024)
 
         self.last_ping_ms = None
-
-
-        self.last_mbps_simple_total = 0.0
-        self.last_mbps_simple_down = 0.0
-        self.last_mbps_simple_up = 0.0
-
-        self.last_mbps_graph_total = 0.0
-        self.last_mbps_graph_down = 0.0
-        self.last_mbps_graph_up = 0.0
-
-
-        self.simple_smooth_len = 10
-        self.simple_hist_total = deque([0.0] * self.simple_smooth_len, maxlen=self.simple_smooth_len)
-        self.simple_hist_down = deque([0.0] * self.simple_smooth_len, maxlen=self.simple_smooth_len)
-        self.simple_hist_up = deque([0.0] * self.simple_smooth_len, maxlen=self.simple_smooth_len)
+        self.last_mbps_graph = 0.0
+        self.last_mbps_simple = 0.0
 
         self.ping_sent = 0
         self.ping_ok = 0
         self.ping_fail = 0
 
-
         self.buf_len = 240
         now = time.time()
         self.t_hist = deque([now] * self.buf_len, maxlen=self.buf_len)
-        self.mbps_hist = deque([0.0] * self.buf_len, maxlen=self.buf_len)  # total
+        self.mbps_hist = deque([0.0] * self.buf_len, maxlen=self.buf_len)
         self.ping_hist = deque([float("nan")] * self.buf_len, maxlen=self.buf_len)
-
 
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self.tick_stats)
@@ -959,11 +942,17 @@ class NetPulseWindow(QWidget):
         self.ping_timer.timeout.connect(self.request_ping)
         self.ping_timer.start(self.settings.ping_refresh_ms)
 
-
         self.tray = None
         self.tray_update_timer = None
-        self._setup_tray()
+        self.tray_menu = None
 
+        self.tray_info1 = None
+        self.tray_info2 = None
+        self.tray_info3 = None
+        self.tray_info4 = None
+        self.tray_act_toggle = None
+
+        self._setup_tray()
 
         self._apply_styles()
         self._update_background()
@@ -973,7 +962,6 @@ class NetPulseWindow(QWidget):
         self._apply_graph_pens()
 
         set_windows_autostart(APP_NAME, self.settings.autostart)
-
 
     def _build_simple_page(self) -> QWidget:
         page = QWidget()
@@ -1028,12 +1016,9 @@ class NetPulseWindow(QWidget):
         l.setContentsMargins(12, 8, 12, 12)
         l.setSpacing(10)
 
-        self.lbl_adv_line1 = QLabel("");
-        self.lbl_adv_line1.setObjectName("advinfo")
-        self.lbl_adv_line2 = QLabel("");
-        self.lbl_adv_line2.setObjectName("advinfo")
-        self.lbl_adv_line3 = QLabel("");
-        self.lbl_adv_line3.setObjectName("advinfo")
+        self.lbl_adv_line1 = QLabel(""); self.lbl_adv_line1.setObjectName("advinfo")
+        self.lbl_adv_line2 = QLabel(""); self.lbl_adv_line2.setObjectName("advinfo")
+        self.lbl_adv_line3 = QLabel(""); self.lbl_adv_line3.setObjectName("advinfo")
         l.addWidget(self.lbl_adv_line1)
         l.addWidget(self.lbl_adv_line2)
         l.addWidget(self.lbl_adv_line3)
@@ -1056,37 +1041,50 @@ class NetPulseWindow(QWidget):
             p.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             p.setMinimumHeight(190)
 
-        self.plot_mbps.setTitle("Скорость (Total Mbps)", color="#EDEDED", size="12pt")
+        self.plot_mbps.setTitle("Скорость (Mbps)", color="#EDEDED", size="12pt")
         self.plot_ping.setTitle("Ping (ms)", color="#EDEDED", size="12pt")
         self.plot_mbps.setLabel("left", "Mbps")
         self.plot_ping.setLabel("left", "ms")
 
+        self.plot_mbps.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        self.plot_ping.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+
+        self.plot_mbps.setClipToView(True)
+        self.plot_ping.setClipToView(True)
+
+        self.graph_window_sec = 120
+
         self.mbps_g = self.plot_mbps.plot([], [], pen=pg.mkPen(GREEN, width=self.settings.line_width))
         self.mbps_y = self.plot_mbps.plot([], [], pen=pg.mkPen(YELLOW, width=self.settings.line_width))
         self.mbps_r = self.plot_mbps.plot([], [], pen=pg.mkPen(RED, width=self.settings.line_width))
-        self.mbps_c = self.plot_mbps.plot([], [], pen=pg.mkPen(self.settings.graph_custom_color,
-                                                               width=self.settings.line_width))
+        self.mbps_c = self.plot_mbps.plot([], [], pen=pg.mkPen(self.settings.graph_custom_color, width=self.settings.line_width))
 
         self.ping_g = self.plot_ping.plot([], [], pen=pg.mkPen(GREEN, width=self.settings.line_width))
         self.ping_y = self.plot_ping.plot([], [], pen=pg.mkPen(YELLOW, width=self.settings.line_width))
         self.ping_r = self.plot_ping.plot([], [], pen=pg.mkPen(RED, width=self.settings.line_width))
-        self.ping_c = self.plot_ping.plot([], [], pen=pg.mkPen(self.settings.graph_custom_color,
-                                                               width=self.settings.line_width))
+        self.ping_c = self.plot_ping.plot([], [], pen=pg.mkPen(self.settings.graph_custom_color, width=self.settings.line_width))
 
         l.addWidget(self.plot_mbps, 2)
         l.addWidget(self.plot_ping, 2)
 
-        self.tbl = QTableWidget(0, 5)
-        self.tbl.setHorizontalHeaderLabels(["Адаптер", "Total Mbps", "Down Mbps", "Up Mbps", "Sent/Recv MB"])
+        self.tbl = QTableWidget(0, 4)
+        self.tbl.setHorizontalHeaderLabels(["Адаптер", "Mbps", "Sent MB", "Recv MB"])
         self.tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for i in range(1, 5):
-            self.tbl.horizontalHeader().setSectionResizeMode(i, QHeaderView.ResizeToContents)
-        self.tbl.setObjectName("advtable")
-        self.tbl.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.tbl.setSelectionMode(QTableWidget.NoSelection)
+        self.tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tbl.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+
+        self.tbl.verticalHeader().setVisible(False)
+        self.tbl.setShowGrid(False)
+        self.tbl.setFrameShape(QTableWidget.NoFrame)
+        self.tbl.setSelectionMode(QAbstractItemView.NoSelection)
+        self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tbl.setFocusPolicy(Qt.NoFocus)
+
+        self.tbl.setObjectName("advtable")
         self.tbl.setMinimumHeight(180)
         self.tbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
         l.addWidget(self.tbl, 2)
 
         return page
@@ -1105,7 +1103,7 @@ class NetPulseWindow(QWidget):
         self._apply_root_style()
 
     def _apply_root_style(self):
-        alpha = self.settings.window_opacity / 100.0
+        alpha = self.settings.window_opacity / 100.0  # 0..0.60
         base = 0.30 if self.settings.transparent_mode else 0.55
         a = min(0.85, base + alpha)
 
@@ -1134,7 +1132,6 @@ class NetPulseWindow(QWidget):
                 color: rgba(255,255,255,0.90);
                 border: 1px solid rgba(255,255,255,0.14);
                 border-radius: 12px;
-                gridline-color: rgba(255,255,255,0.08);
             }}
             QHeaderView::section {{
                 background: rgba(0,0,0,0.30);
@@ -1223,16 +1220,26 @@ class NetPulseWindow(QWidget):
         self.settings.window_y = int(pos.y())
         save_settings(self.settings)
 
-    def _resolve_adapter(self, value: str) -> str:
+    def _resolve_active_adapter(self) -> str:
+        return self.active_adapter
 
-        v = (value or "active")
-        if v == "active":
+    def _resolve_simple_adapter(self) -> str:
+        nic = (self.settings.simple_adapter or "active")
+        if nic == "active":
             return self.active_adapter
-
-        if v not in psutil.net_if_stats():
+        if nic not in self.nic_speed_mbps:
             return self.active_adapter
-        return v
+        return nic
 
+    def _resolve_graph_adapter(self) -> str:
+        nic = (self.settings.graph_adapter or "active")
+
+        if nic == "active":
+            return self._resolve_simple_adapter()
+
+        if nic not in self.nic_speed_mbps:
+            return self._resolve_simple_adapter()
+        return nic
 
     def _apply_graph_follow(self):
         if hasattr(self, "plot_ping") and hasattr(self, "plot_mbps"):
@@ -1275,215 +1282,214 @@ class NetPulseWindow(QWidget):
         tray_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self.tray = QSystemTrayIcon(tray_icon, self)
 
-        menu = QMenu()
-        act_show = QAction("Открыть", self)
+        self.tray_menu = QMenu()
+
+        self.tray_info1 = QAction("...", self); self.tray_info1.setEnabled(False)
+        self.tray_info2 = QAction("...", self); self.tray_info2.setEnabled(False)
+        self.tray_info3 = QAction("...", self); self.tray_info3.setEnabled(False)
+        self.tray_info4 = QAction("...", self); self.tray_info4.setEnabled(False)
+
+        self.tray_menu.addAction(self.tray_info1)
+        self.tray_menu.addAction(self.tray_info2)
+        self.tray_menu.addAction(self.tray_info3)
+        self.tray_menu.addAction(self.tray_info4)
+        self.tray_menu.addSeparator()
+
+        self.tray_act_toggle = QAction("Показать", self)
         act_hide = QAction("Скрыть", self)
         act_quit = QAction("Выход", self)
-        act_show.triggered.connect(self.show_normal)
+
+        self.tray_act_toggle.triggered.connect(self._toggle_show_hide)
         act_hide.triggered.connect(self.hide)
         act_quit.triggered.connect(QApplication.quit)
-        menu.addAction(act_show)
-        menu.addAction(act_hide)
-        menu.addSeparator()
-        menu.addAction(act_quit)
-        self.tray.setContextMenu(menu)
+
+        self.tray_menu.addAction(self.tray_act_toggle)
+        self.tray_menu.addAction(act_hide)
+        self.tray_menu.addSeparator()
+        self.tray_menu.addAction(act_quit)
+
+        self.tray.setContextMenu(self.tray_menu)
         self.tray.activated.connect(self._tray_activated)
         self.tray.show()
 
         self.tray_update_timer = QTimer(self)
-        self.tray_update_timer.timeout.connect(self._update_tray_tooltip)
-        self.tray_update_timer.start(1000)
-        self._update_tray_tooltip()
+        self.tray_update_timer.timeout.connect(self._update_tray_menu_info)
+        self.tray_update_timer.start(max(500, self.settings.stats_refresh_ms))
+        self._update_tray_menu_info()
 
-    def _update_tray_tooltip(self):
+    def _toggle_show_hide(self):
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show_normal()
+
+    def _update_tray_menu_info(self):
         ping = self.last_ping_ms
         ping_str = "—" if ping is None else f"{ping} ms"
 
-        simple_nic = self._resolve_adapter(self.settings.simple_adapter)
-        graph_nic = self._resolve_adapter(self.settings.graph_adapter)
+        simple_nic = self._resolve_simple_adapter()
+        graph_nic = self._resolve_graph_adapter()
 
-        tip = (
-            f"{APP_NAME} v{APP_VERSION}\n"
-            f"Active: {self.active_adapter}\n"
-            f"Simple: {simple_nic}  |  Graph: {graph_nic}\n"
-            f"Simple Total: {self.last_mbps_simple_total:.2f} Mbps (D {self.last_mbps_simple_down:.2f} / U {self.last_mbps_simple_up:.2f})\n"
-            f"Ping: {ping_str} -> {self.settings.ping_host}\n"
-            f"Requests: {self.ping_sent} (ok {self.ping_ok} / fail {self.ping_fail})\n"
-            f"Sent: {self.total_sent_mb:.2f} MB | Recv: {self.total_recv_mb:.2f} MB"
-        )
-        if self.tray:
-            self.tray.setToolTip(tip)
+        port_str = f":{self.settings.ping_port}" if int(self.settings.ping_port or 0) > 0 else " (auto)"
+        self.tray_info1.setText(f"{APP_NAME} v{APP_VERSION}  |  Active: {self.active_adapter}")
+        self.tray_info2.setText(f"Simple: {simple_nic} {self.last_mbps_simple:.2f} Mbps  |  Graph: {graph_nic} {self.last_mbps_graph:.2f} Mbps")
+        self.tray_info3.setText(f"Ping: {ping_str}  →  {self.settings.ping_host}{port_str}")
+        self.tray_info4.setText(f"Req: {self.ping_sent} (ok {self.ping_ok} / fail {self.ping_fail})  |  ↑ {self.total_sent_mb:.2f} MB  ↓ {self.total_recv_mb:.2f} MB")
+
+        if self.tray_act_toggle:
+            self.tray_act_toggle.setText("Скрыть" if self.isVisible() else "Показать")
+
+        if self.tray and self.settings.tray_click_popup:
+            self.tray.setToolTip(f"{APP_NAME}: {self.last_mbps_simple:.2f} Mbps / {ping_str}")
 
     def _tray_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger:
-            if self.settings.tray_click_popup and self.tray:
-                self._update_tray_tooltip()
-                self.tray.showMessage(APP_NAME, self.tray.toolTip(), QSystemTrayIcon.Information, 2500)
-            if self.isVisible():
-                self.hide()
-            else:
-                self.show_normal()
+            self._update_tray_menu_info()
+            if self.tray_menu:
+                self.tray_menu.popup(QCursor.pos())
 
     def show_normal(self):
         self.show()
         self.raise_()
         self.activateWindow()
+        if self.tray_act_toggle:
+            self.tray_act_toggle.setText("Скрыть")
 
+    def _needed_nics(self) -> set:
+        need = set()
+        need.add(self.active_adapter)
+        need.add(self._resolve_graph_adapter())
+        need.add(self._resolve_simple_adapter())
+        for nic in (self.settings.monitored_adapters or []):
+            need.add(nic)
+        return need
 
     def tick_stats(self):
-        # refresh active adapter
-        new_adapter = pick_active_adapter_name()
-        if new_adapter != self.active_adapter:
-            self.active_adapter = new_adapter
-            self.lbl_connected.setText(f"Подключено — {self.active_adapter}")
+        tnow = time.time()
 
+        if tnow - self._last_active_check >= self._active_check_interval:
+            self._last_active_check = tnow
+            new_adapter = pick_active_adapter_name()
+            if new_adapter != self.active_adapter:
+                self.active_adapter = new_adapter
+                self.lbl_connected.setText(f"Подключено — {self.active_adapter}")
 
+        needed = self._needed_nics()
         pernic = psutil.net_io_counters(pernic=True)
 
-        tmono = time.monotonic()
-        twall = time.time()
-
-        for nic, c in pernic.items():
+        for nic in list(needed):
+            c = pernic.get(nic)
+            if c is None:
+                continue
             sent, recv = c.bytes_sent, c.bytes_recv
-
             if nic not in self.nic_last:
-                self.nic_last[nic] = (sent, recv, tmono)
-                self.nic_speed_total_mbps[nic] = 0.0
-                self.nic_speed_down_mbps[nic] = 0.0
-                self.nic_speed_up_mbps[nic] = 0.0
+                self.nic_last[nic] = (sent, recv, tnow)
+                self.nic_speed_mbps[nic] = 0.0
                 self.nic_sent_mb[nic] = sent / (1024 * 1024)
                 self.nic_recv_mb[nic] = recv / (1024 * 1024)
             else:
-                psent, precv, ptm = self.nic_last[nic]
-                dt = max(0.050, tmono - ptm)
-                d_sent = max(0, sent - psent)
-                d_recv = max(0, recv - precv)
-
-                up_mbps = (d_sent * 8.0) / dt / 1_000_000.0
-                down_mbps = (d_recv * 8.0) / dt / 1_000_000.0
-                total_mbps = up_mbps + down_mbps
-
-                self.nic_speed_up_mbps[nic] = float(max(0.0, up_mbps))
-                self.nic_speed_down_mbps[nic] = float(max(0.0, down_mbps))
-                self.nic_speed_total_mbps[nic] = float(max(0.0, total_mbps))
-
+                psent, precv, pt = self.nic_last[nic]
+                dt = max(0.10, tnow - pt)
+                ds = sent - psent
+                dr = recv - precv
+                self.nic_speed_mbps[nic] = max(0.0, (ds + dr) * 8.0 / dt / 1_000_000.0)
                 self.nic_sent_mb[nic] = sent / (1024 * 1024)
                 self.nic_recv_mb[nic] = recv / (1024 * 1024)
-                self.nic_last[nic] = (sent, recv, tmono)
-
+                self.nic_last[nic] = (sent, recv, tnow)
 
         io = psutil.net_io_counters()
         self.total_sent_mb = io.bytes_sent / (1024 * 1024)
         self.total_recv_mb = io.bytes_recv / (1024 * 1024)
 
+        simple_nic = self._resolve_simple_adapter()
+        graph_nic = self._resolve_graph_adapter()
 
-        simple_nic = self._resolve_adapter(self.settings.simple_adapter)
-        self.last_mbps_simple_total = float(self.nic_speed_total_mbps.get(simple_nic, 0.0))
-        self.last_mbps_simple_down = float(self.nic_speed_down_mbps.get(simple_nic, 0.0))
-        self.last_mbps_simple_up = float(self.nic_speed_up_mbps.get(simple_nic, 0.0))
+        self.last_mbps_simple = float(self.nic_speed_mbps.get(simple_nic, 0.0))
+        self.last_mbps_graph = float(self.nic_speed_mbps.get(graph_nic, 0.0))
 
-        self.simple_hist_total.append(self.last_mbps_simple_total)
-        self.simple_hist_down.append(self.last_mbps_simple_down)
-        self.simple_hist_up.append(self.last_mbps_simple_up)
-
-
-        graph_nic = self._resolve_adapter(self.settings.graph_adapter)
-        self.last_mbps_graph_total = float(self.nic_speed_total_mbps.get(graph_nic, 0.0))
-
-
-        self.t_hist.append(twall)
-        self.mbps_hist.append(self.last_mbps_graph_total)
-        self.ping_hist.append(float(self.last_ping_ms) if self.last_ping_ms is not None else float("nan"))
+        self.t_hist.append(tnow)
+        self.mbps_hist.append(float(self.last_mbps_graph))
+        self.ping_hist.append(float(self.last_ping_ms) if isinstance(self.last_ping_ms, int) else float("nan"))
 
         self._update_simple_ui()
         if self.settings.mode == "advanced":
             self._update_advanced_ui()
 
+        if self.tray:
+            self._update_tray_menu_info()
+
     def request_ping(self):
+        if self.ping_running:
+            return
+        self.ping_running = True
         self.ping_sent += 1
-        task = PingTask(self.settings.ping_host)
+
+        task = PingTask(self.settings.ping_host, int(self.settings.ping_port or 0))
         task.signals.done.connect(self.on_ping_done)
         self.thread_pool.start(task)
 
     def on_ping_done(self, ms):
         if isinstance(ms, int):
-            self.last_ping_ms = ms
+            self.last_ping_ms = int(ms)
             self.ping_ok += 1
         else:
             self.last_ping_ms = None
             self.ping_fail += 1
 
+        self.ping_running = False
+
         self._update_simple_ui()
         if self.settings.mode == "advanced":
             self._update_advanced_ui()
 
-
-    def _format_rate(self, mbps: float) -> str:
-
-        if mbps < 1.0:
-            return f"{mbps * 1000:.0f} Kbps"
-        return f"{mbps:.1f} Mbps"
+        if self.tray:
+            self._update_tray_menu_info()
 
     def _update_simple_ui(self):
         ping = self.last_ping_ms
+        mbps = self.last_mbps_simple
 
-
-        avg_total = sum(self.simple_hist_total) / max(1, len(self.simple_hist_total))
-        avg_down = sum(self.simple_hist_down) / max(1, len(self.simple_hist_down))
-        avg_up = sum(self.simple_hist_up) / max(1, len(self.simple_hist_up))
-
-
-        self.lbl_mbps.setText(self._format_rate(avg_total))
+        self.lbl_mbps.setText(f"{mbps:.1f} Mbps")
         self.lbl_ping.setText(f"{('—' if ping is None else ping)} ms")
 
-
-        c_mbps = quality_color(avg_total, self.settings.good_mbps, self.settings.ok_mbps, invert=False)
+        c_mbps = quality_color(mbps, self.settings.good_mbps, self.settings.ok_mbps, invert=False)
         c_ping = quality_color(ping, self.settings.good_ping_ms, self.settings.ok_ping_ms, invert=True)
 
         self.lbl_mbps.setStyleSheet(f"color:{c_mbps}; font-size:34px; font-weight:800; letter-spacing:0.5px;")
         self.lbl_ping.setStyleSheet(f"color:{c_ping}; font-size:34px; font-weight:800; letter-spacing:0.5px;")
-
 
         self.lbl_up.setText(f"↑ {self.total_sent_mb:.2f} MB")
         self.lbl_down.setText(f"↓ {self.total_recv_mb:.2f} MB")
 
     def _update_advanced_ui(self):
         ping_str = "—" if self.last_ping_ms is None else f"{self.last_ping_ms} ms"
-        simple_nic = self._resolve_adapter(self.settings.simple_adapter)
-        graph_nic = self._resolve_adapter(self.settings.graph_adapter)
+        graph_nic = self._resolve_graph_adapter()
+        simple_nic = self._resolve_simple_adapter()
+        port_str = f":{self.settings.ping_port}" if int(self.settings.ping_port or 0) > 0 else " (auto)"
 
-        self.lbl_adv_line1.setText(
-            f"Active: {self.active_adapter}   |   Simple: {simple_nic}   |   Graph: {graph_nic}   |   Target: {self.settings.ping_host}")
-        self.lbl_adv_line2.setText(f"Graph Total: {self.last_mbps_graph_total:.2f} Mbps   |   Ping: {ping_str}")
-        self.lbl_adv_line3.setText(
-            f"Requests: {self.ping_sent} (ok {self.ping_ok} / fail {self.ping_fail})   |   Sent {self.total_sent_mb:.2f} MB   Recv {self.total_recv_mb:.2f} MB")
+        self.lbl_adv_line1.setText(f"Active: {self.active_adapter}   |   Simple: {simple_nic}   |   Graph: {graph_nic}")
+        self.lbl_adv_line2.setText(f"Speed(simple): {self.last_mbps_simple:.2f} Mbps   |   Speed(graph): {self.last_mbps_graph:.2f} Mbps   |   Ping: {ping_str}")
+        self.lbl_adv_line3.setText(f"Target: {self.settings.ping_host}{port_str}   |   Requests: {self.ping_sent} (ok {self.ping_ok} / fail {self.ping_fail})   |   ↑ {self.total_sent_mb:.2f} MB   ↓ {self.total_recv_mb:.2f} MB")
 
         xs = list(self.t_hist)
-        mbps_ys = list(self.mbps_hist)
-        ping_ys = list(self.ping_hist)
-
+        mbps_ys = [float(v) for v in self.mbps_hist]
+        ping_ys = [float(v) for v in self.ping_hist]
 
         if self.settings.graph_color_mode == "custom":
             self.mbps_c.setData(xs, mbps_ys)
             self.ping_c.setData(xs, ping_ys)
 
             nan = float("nan")
-            self.mbps_g.setData(xs, [nan] * len(xs));
-            self.mbps_y.setData(xs, [nan] * len(xs));
-            self.mbps_r.setData(xs, [nan] * len(xs))
-            self.ping_g.setData(xs, [nan] * len(xs));
-            self.ping_y.setData(xs, [nan] * len(xs));
-            self.ping_r.setData(xs, [nan] * len(xs))
+            self.mbps_g.setData(xs, [nan]*len(xs)); self.mbps_y.setData(xs, [nan]*len(xs)); self.mbps_r.setData(xs, [nan]*len(xs))
+            self.ping_g.setData(xs, [nan]*len(xs)); self.ping_y.setData(xs, [nan]*len(xs)); self.ping_r.setData(xs, [nan]*len(xs))
         else:
-            (xg, yg), (xy, yy), (xr, yr) = split_series_by_quality(xs, mbps_ys, self.settings.good_mbps,
-                                                                   self.settings.ok_mbps, invert=False)
+            (xg, yg), (xy, yy), (xr, yr) = split_series_by_quality(xs, mbps_ys, self.settings.good_mbps, self.settings.ok_mbps, invert=False)
             self.mbps_g.setData(xg, yg)
             self.mbps_y.setData(xy, yy)
             self.mbps_r.setData(xr, yr)
             self.mbps_c.setData([], [])
 
-            (xg2, yg2), (xy2, yy2), (xr2, yr2) = split_series_by_quality(xs, ping_ys, self.settings.good_ping_ms,
-                                                                         self.settings.ok_ping_ms, invert=True)
+            (xg2, yg2), (xy2, yy2), (xr2, yr2) = split_series_by_quality(xs, ping_ys, self.settings.good_ping_ms, self.settings.ok_ping_ms, invert=True)
             self.ping_g.setData(xg2, yg2)
             self.ping_y.setData(xy2, yy2)
             self.ping_r.setData(xr2, yr2)
@@ -1495,21 +1501,29 @@ class NetPulseWindow(QWidget):
 
         rows = []
         for nic in selected:
-            if nic in self.nic_speed_total_mbps:
-                total = self.nic_speed_total_mbps.get(nic, 0.0)
-                down = self.nic_speed_down_mbps.get(nic, 0.0)
-                up = self.nic_speed_up_mbps.get(nic, 0.0)
-                s_mb = self.nic_sent_mb.get(nic, 0.0)
-                r_mb = self.nic_recv_mb.get(nic, 0.0)
-                rows.append((nic, total, down, up, f"{s_mb:.2f}/{r_mb:.2f}"))
+            if nic in self.nic_speed_mbps:
+                rows.append((nic,
+                             float(self.nic_speed_mbps.get(nic, 0.0)),
+                             float(self.nic_sent_mb.get(nic, 0.0)),
+                             float(self.nic_recv_mb.get(nic, 0.0))))
 
         self.tbl.setRowCount(len(rows))
-        for r, (nic, total, down, up, sr) in enumerate(rows):
+        for r, (nic, sp, s_mb, r_mb) in enumerate(rows):
             self.tbl.setItem(r, 0, QTableWidgetItem(nic))
-            self.tbl.setItem(r, 1, QTableWidgetItem(f"{total:.2f}"))
-            self.tbl.setItem(r, 2, QTableWidgetItem(f"{down:.2f}"))
-            self.tbl.setItem(r, 3, QTableWidgetItem(f"{up:.2f}"))
-            self.tbl.setItem(r, 4, QTableWidgetItem(sr))
+            self.tbl.setItem(r, 1, QTableWidgetItem(f"{sp:.2f}"))
+            self.tbl.setItem(r, 2, QTableWidgetItem(f"{s_mb:.2f}"))
+            self.tbl.setItem(r, 3, QTableWidgetItem(f"{r_mb:.2f}"))
+
+        if xs:
+            tmax = xs[-1]
+            tmin = tmax - self.graph_window_sec
+
+            self.plot_mbps.setXRange(tmin, tmax, padding=0)
+            if not self.settings.follow_graph:
+                self.plot_ping.setXRange(tmin, tmax, padding=0)
+
+            self.plot_mbps.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+            self.plot_ping.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)
@@ -1549,6 +1563,7 @@ class NetPulseWindow(QWidget):
 
 
 def main():
+    ensure_seed_backgrounds()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
