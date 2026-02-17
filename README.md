@@ -13,8 +13,7 @@ NetPulse - ключ к лучшему мониторингу!
 # Изображения
 Простой режим:
 
-<img width="621" height="323" alt="Screenshot 2026-02-17 at 2 33 51 PM" src="https://github.com/user-attachments/assets/c7b1aa8d-fb52-4a9b-b928-939f92e743b9" />
-
+<img width="873" height="319" alt="Screenshot 2026-02-17 at 3 24 49 PM" src="https://github.com/user-attachments/assets/07025ccf-ffac-4c46-a7ab-ba7074465f36" />
 
 Расширенный режим: 
 
