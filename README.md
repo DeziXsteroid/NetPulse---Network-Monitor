@@ -24,39 +24,7 @@
   </a>
 </p>
 
-<p align="center">
-  <sub>Latest release: <strong>Version 0.3 Hotfix</strong> • ready-to-run Windows executable • tag <strong>v3</strong></sub>
-</p>
-
-<p align="center">
-  <img src="BaseImage1.png" alt="NetPulse Preview" width="900" />
-</p>
-
-## **What NetPulse Does**
-
-> **Shows live network information** in a simple always-visible desktop widget
->
-> **Monitors latency and outgoing traffic** in real time
->
-> **Supports tray mode** so the app can stay available without occupying screen space
->
-> **Offers a customizable interface** for users with different visual preferences
->
-> **Includes an advanced mode** for deeper control and adapter-level monitoring
-
-## **Download**
-
-<p align="center">
-  <a href="https://github.com/DeziXsteroid/NetPulse_NetworkSpeed_Checker/releases/download/v3/NetPulse03.exe">
-    <img src="https://img.shields.io/badge/Available%20for-Windows-111111?style=for-the-badge&logo=windows&logoColor=white" alt="Available for Windows" />
-  </a>
-</p>
-
-```text
-Download NetPulse03.exe -> launch the app -> pin it to tray if you want -> start monitoring
-```
-
-## **Preview**
+<h1 align="center">Preview of programm</h1>
 
 <p align="center">
   <strong>Simple Mode</strong>
@@ -85,6 +53,19 @@ Download NetPulse03.exe -> launch the app -> pin it to tray if you want -> start
 > **Adapter-aware monitoring** for more serious inspection
 >
 > **A lot of personalization** without turning the app into a mess
+> 
+
+## **What NetPulse Does**
+
+> **Shows live network information** in a simple always-visible desktop widget
+>
+> **Monitors latency and outgoing traffic** in real time
+>
+> **Supports tray mode** so the app can stay available without occupying screen space
+>
+> **Offers a customizable interface** for users with different visual preferences
+>
+> **Includes an advanced mode** for deeper control and adapter-level monitoring
 
 ## **Run From Source**
 
@@ -92,23 +73,6 @@ Download NetPulse03.exe -> launch the app -> pin it to tray if you want -> start
 pip install psutil pyqtgraph PySide6
 python main.py
 ```
-
-## **Tech Stack**
-
-> **Python**
->
-> **PySide6**
->
-> **pyqtgraph**
->
-> **psutil**
-
-## **Repository Contents**
-
-- `main.py` main application logic
-- `BaseImage1.png` project preview image
-- `netpulse.ico` app icon
-- `LICENSE` repository license
 
 ## **Latest Release**
 
